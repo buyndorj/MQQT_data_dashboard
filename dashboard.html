@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="mn">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Custom MQTT Dashboard</title>
+  <!-- MQTT болон Chart.js сангууд -->
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background-color: #0b1329; color: #ffffff; padding: 24px; }
+    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; padding-bottom: 12px; border-bottom: 1px solid #1e293b; }
+    h1 { font-size: 24px; font-weight: 700; color: #f8fafc; }
+    .status-badge { padding: 6px 14px; border-radius: 9999px; font-size: 13px; font-weight: 600; background: #334155; color: #94a3b8; }
+    .status-online { background: rgba(34, 197, 94, 0.2); color: #4ade80; border: 1px solid #22c55e; }
+    
+    /* Карт картууд */
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
+    .card { background: #131e3a; border-radius: 16px; padding: 20px; border: 1px solid #1e2d5a; box-shadow: 0 4px 20px rgba(0,0,0,0.25); }
+    .card-title { font-size: 14px; color: #94a3b8; font-weight: 600; text-transform: uppercase; margin-bottom: 8px; }
+    .card-value { font-size: 36px; font-weight: 700; margin-bottom: 4px; }
+    .temp-val { color: #38bdf8; }
+    .hum-val { color: #34d399; }
+    .led-val { color: #fbbf24; }
+
+    /* Удирдлагын товчнууд */
+    .control-panel { background: #131e3a; border-radius: 16px; padding: 20px; border: 1px solid #1e2d5a; margin-bottom: 24px; display: flex; align-items: center; justify-content: space-between; }
+    .btn-group { display: flex; gap: 12px; }
+    button { padding: 10px 24px; font-size: 14px; font-weight: 600; border-radius: 10px; border: none; cursor: pointer; transition: 0.2s; }
+    .btn-on { background: #10b981; color: white; }
+    .btn-off { background: #ef4444; color: white; }
+    button:hover { opacity: 0.85; transform: scale(1.02); }
+
+    /* Графикууд */
+    .charts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 16px; }
+    .chart-container { background: #131e3a; border-radius: 16px; padding: 20px; border: 1px solid #1e2d5a; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>MQTT Real-Time Dashboard</h1>
+    <div id="connStatus" class="status-badge">Broker-той холбогдож байна...</div>
+  </header>
+
+  <!-- Тоон утгууд харуулах картууд -->
+  <div class="grid">
+    <div class="card">
+      <div class="card-title">Температур</div>
+      <div id="tempVal" class="card-value temp-val">-- °C</div>
+      <div style="font-size: 12px; color: #64748b;">Мэдрэгч: DHT11</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Агаарын чийгшил</div>
+      <div id="humVal" class="card-value hum-val">-- %</div>
+      <div style="font-size: 12px; color: #64748b;">Мэдрэгч: DHT11</div>
+    </div>
+    <div class="card">
+      <div class="card-title">LED Төлөв</div>
+      <div id="ledVal" class="card-value led-val">--</div>
+      <div style="font-size: 12px; color: #64748b;">GPIO 2 хөл</div>
+    </div>
+  </div>
+
+  <!-- LED удирдах хэсэг -->
+  <div class="control-panel">
+    <div>
+      <div style="font-size: 16px; font-weight: 600;">Гэрэл Удирдах (Control)</div>
+      <div style="font-size: 13px; color: #64748b;">Topic: team1/led</div>
+    </div>
+    <div class="btn-group">
+      <button class="btn-on" onclick="publishCmd('ON')">LED АСААХ</button>
+      <button class="btn-off" onclick="publishCmd('OFF')">LED УНТРААХ</button>
+    </div>
+  </div>
+
+  <!-- Цаг хугацааны графикууд -->
+  <div class="charts-grid">
+    <div class="chart-container">
+      <h3 style="margin-bottom: 12px; font-size: 16px; color: #38bdf8;">Температурын График (°C)</h3>
+      <canvas id="tempChart"></canvas>
+    </div>
+    <div class="chart-container">
+      <h3 style="margin-bottom: 12px; font-size: 16px; color: #34d399;">Чийгшлийн График (%)</h3>
+      <canvas id="humChart"></canvas>
+    </div>
+  </div>
+
+  <script>
+    const brokerUrl = "ws://localhost:9001";
+    const telemetryTopic = "team1/msg";
+    const controlTopic = "team1/led";
+
+    // Chart.js тохиргоо
+    const maxDataPoints = 12;
+    const commonChartOptions = {
+      responsive: true,
+      scales: {
+        x: { grid: { color: '#1e293b' }, ticks: { color: '#94a3b8' } },
+        y: { grid: { color: '#1e293b' }, ticks: { color: '#94a3b8' } }
+      },
+      plugins: { legend: { display: false } }
+    };
+
+    const ctxTemp = document.getElementById('tempChart').getContext('2d');
+    const tempChart = new Chart(ctxTemp, {
+      type: 'line',
+      data: { labels: [], datasets: [{ data: [], borderColor: '#38bdf8', backgroundColor: 'rgba(56, 189, 248, 0.1)', tension: 0.3, fill: true }] },
+      options: commonChartOptions
+    });
+
+    const ctxHum = document.getElementById('humChart').getContext('2d');
+    const humChart = new Chart(ctxHum, {
+      type: 'line',
+      data: { labels: [], datasets: [{ data: [], borderColor: '#34d399', backgroundColor: 'rgba(52, 211, 153, 0.1)', tension: 0.3, fill: true }] },
+      options: commonChartOptions
+    });
+
+    // MQTT Websocket Холболт
+    const client = mqtt.connect(brokerUrl);
+
+    client.on("connect", () => {
+      const statusBadge = document.getElementById("connStatus");
+      statusBadge.innerText = "Холбогдсон (Online)";
+      statusBadge.className = "status-badge status-online";
+      client.subscribe(telemetryTopic);
+    });
+
+    client.on("message", (topic, message) => {
+      if (topic === telemetryTopic) {
+        try {
+          const payload = JSON.parse(message.toString());
+          const currentTime = new Date().toLocaleTimeString();
+
+          if (payload.temperature !== undefined) {
+            document.getElementById("tempVal").innerText = payload.temperature + " °C";
+            addDataPoint(tempChart, currentTime, payload.temperature);
+          }
+          if (payload.humidity !== undefined) {
+            document.getElementById("humVal").innerText = payload.humidity + " %";
+            addDataPoint(humChart, currentTime, payload.humidity);
+          }
+          if (payload.led !== undefined) {
+            document.getElementById("ledVal").innerText = payload.led === 1 ? "ON (Ассан)" : "OFF (Унтарсан)";
+          }
+        } catch (e) {
+          console.error("JSON parse error:", e);
+        }
+      }
+    });
+
+    function addDataPoint(chart, label, data) {
+      chart.data.labels.push(label);
+      chart.data.datasets[0].data.push(data);
+      if (chart.data.labels.length > maxDataPoints) {
+        chart.data.labels.shift();
+        chart.data.datasets[0].data.shift();
+      }
+      chart.update();
+    }
+
+    function publishCmd(cmd) {
+      client.publish(controlTopic, cmd);
+    }
+  </script>
+</body>
+</html>
